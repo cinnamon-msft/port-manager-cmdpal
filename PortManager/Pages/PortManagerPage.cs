@@ -1,17 +1,41 @@
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 using System.Diagnostics;
-using System.Net.NetworkInformation;
 
 namespace PortManager;
 
 public sealed partial class PortManagerPage : ListPage
 {
-    private static readonly int[] CommonDevPorts =
-    [
-        3000, 3001, 4200, 4321, 5000, 5001, 5173, 5174,
-        8000, 8080, 8081, 8443, 8888, 9000, 9090, 9229,
-    ];
+    // Well-known system/OS processes that listen on ports but aren't user dev servers
+    private static readonly HashSet<string> SystemProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "System", "svchost", "lsass", "services", "wininit", "csrss", "smss",
+        "spoolsv", "SearchIndexer", "SecurityHealthService", "MsMpEng",
+        "WmiPrvSE", "dasHost", "LsaIso", "fontdrvhost", "dwm", "sihost",
+        "RuntimeBroker", "ShellExperienceHost", "StartMenuExperienceHost",
+        "explorer", "TextInputHost", "ctfmon", "conhost", "dllhost",
+        "WUDFHost", "audiodg", "mDNSResponder", "mqsvc", "sqlservr",
+        "nginx", "httpd", "w3wp",
+        // Windows networking / infrastructure
+        "DNS", "Dnscache", "BFE", "mpssvc", "NlaSvc", "iphlpsvc",
+        // Microsoft services
+        "OneDrive", "Teams", "Outlook", "msedge", "msedgewebview2",
+        "PowerToys", "PowerToys.Settings", "Microsoft.CmdPal",
+        "SearchHost", "Widgets", "WidgetService", "PhoneExperienceHost",
+        "WindowsTerminal", "OpenConsole",
+        // SSH / remote
+        "sshd", "ssh-agent",
+    };
+
+    // Process names commonly associated with dev servers
+    private static readonly HashSet<string> DevServerProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "node", "dotnet", "python", "python3", "pythonw", "ruby", "java", "javaw",
+        "go", "cargo", "rust-analyzer", "deno", "bun",
+        "php", "beam.smp", "elixir", "erl", "mix",
+        "uvicorn", "gunicorn", "flask", "django",
+        "next-server", "vite", "webpack",
+    };
 
     public PortManagerPage()
     {
@@ -22,54 +46,64 @@ public sealed partial class PortManagerPage : ListPage
 
     public override IListItem[] GetItems()
     {
-        var items = new List<IListItem>();
-
         try
         {
+            var items = new List<IListItem>();
             var activeConnections = GetActivePortMappings();
 
             foreach (var (port, pid) in activeConnections.OrderBy(x => x.Port))
             {
                 var processName = GetProcessName(pid);
-                var isCommonPort = CommonDevPorts.Contains(port);
-                var tag = isCommonPort ? new Tag("dev") : null;
+
+                if (SystemProcesses.Contains(processName))
+                {
+                    continue;
+                }
+
+                var isDevServer = DevServerProcesses.Contains(processName);
+                var tags = new List<Tag>();
+                if (isDevServer)
+                {
+                    tags.Add(new Tag("dev server"));
+                }
 
                 var stopCommand = new StopProcessCommand(pid, port, processName, this);
 
                 var item = new ListItem(stopCommand)
                 {
-                    Title = $":{port}",
-                    Subtitle = $"{processName} (PID {pid})",
-                    Icon = new IconInfo("\uEA3A"),
-                    Tags = tag is not null ? [tag] : [],
+                    Title = $":{port}  —  {processName}",
+                    Subtitle = $"PID {pid}",
+                    Icon = new IconInfo(isDevServer ? "\uE774" : "\uEA3A"),
+                    Tags = [.. tags],
                 };
 
                 items.Add(item);
             }
+
+            if (items.Count == 0)
+            {
+                items.Add(new ListItem(new NoOpCommand())
+                {
+                    Title = "No dev servers running",
+                    Subtitle = "Start a server and it will appear here",
+                    Icon = new IconInfo("\uE930"),
+                });
+            }
+
+            return [.. items];
         }
         catch (Exception ex)
         {
-            Debug.Write($"PortManager error: {ex}");
-            items.Add(new ListItem(new NoOpCommand())
-            {
-                Title = "Error scanning ports",
-                Subtitle = ex.Message,
-                Icon = new IconInfo("\uE783"),
-            });
-            return [.. items];
+            return
+            [
+                new ListItem(new NoOpCommand())
+                {
+                    Title = "Error scanning ports",
+                    Subtitle = ex.Message,
+                    Icon = new IconInfo("\uE783"),
+                },
+            ];
         }
-
-        if (items.Count == 0)
-        {
-            items.Add(new ListItem(new NoOpCommand())
-            {
-                Title = "No active listeners found",
-                Subtitle = "All common dev ports are free",
-                Icon = new IconInfo("\uE930"),
-            });
-        }
-
-        return [.. items];
     }
 
     internal void Refresh()
@@ -83,34 +117,36 @@ public sealed partial class PortManagerPage : ListPage
 
         try
         {
-            var startInfo = new ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
-                FileName = "netstat",
+                FileName = "netstat.exe",
                 Arguments = "-ano -p TCP",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
             };
 
-            using var process = Process.Start(startInfo);
-            if (process is null)
+            using var proc = Process.Start(psi);
+            if (proc is null)
             {
                 return results;
             }
 
-            var output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
 
-            foreach (var line in output.Split('\n'))
+            var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
             {
                 var trimmed = line.Trim();
-                if (!trimmed.StartsWith("TCP"))
+                if (!trimmed.StartsWith("TCP", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                var parts = trimmed.Split([' '], StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 5 || parts[3] != "LISTENING")
+                var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5 || !string.Equals(parts[3], "LISTENING", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -122,22 +158,16 @@ public sealed partial class PortManagerPage : ListPage
                     continue;
                 }
 
-                if (!int.TryParse(localAddress[(lastColon + 1)..], out var port))
+                if (!int.TryParse(localAddress.AsSpan(lastColon + 1), out var port))
                 {
                     continue;
                 }
 
-                if (!int.TryParse(parts[4], out var pid))
+                if (!int.TryParse(parts[4], out var pid) || pid == 0)
                 {
                     continue;
                 }
 
-                if (pid == 0)
-                {
-                    continue;
-                }
-
-                // Deduplicate — keep first occurrence of each port
                 if (!results.Any(r => r.Port == port))
                 {
                     results.Add((port, pid));
@@ -146,7 +176,7 @@ public sealed partial class PortManagerPage : ListPage
         }
         catch
         {
-            // Silently fail if netstat is unavailable
+            // Return whatever we have so far
         }
 
         return results;

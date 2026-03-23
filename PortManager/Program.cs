@@ -1,5 +1,6 @@
 using Microsoft.CommandPalette.Extensions;
 using Shmuelie.WinRTServer;
+using Shmuelie.WinRTServer.CsWinRT;
 
 namespace PortManager;
 
@@ -10,12 +11,17 @@ public static class Program
     {
         if (args.Length > 0 && args[0] == "-RegisterProcessAsComServer")
         {
-            var server = new ComServer();
-            server.RegisterClass<PortManager, IExtension>();
+            global::Shmuelie.WinRTServer.ComServer server = new();
+
+            ManualResetEvent extensionDisposedEvent = new(false);
+
+            PortManager extensionInstance = new(extensionDisposedEvent);
+            server.RegisterClass<PortManager, IExtension>(() => extensionInstance);
             server.Start();
 
-            // Keep the process alive until terminated by the host
-            Thread.Sleep(Timeout.Infinite);
+            extensionDisposedEvent.WaitOne();
+            server.Stop();
+            server.UnsafeDispose();
         }
     }
 }

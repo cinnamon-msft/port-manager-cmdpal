@@ -8,7 +8,13 @@ namespace PortManager;
 [ComDefaultInterface(typeof(IExtension))]
 public sealed partial class PortManager : IExtension, IDisposable
 {
+    private readonly ManualResetEvent _extensionDisposedEvent;
     private readonly PortManagerCommandsProvider _provider = new();
+
+    public PortManager(ManualResetEvent extensionDisposedEvent)
+    {
+        _extensionDisposedEvent = extensionDisposedEvent;
+    }
 
     public object GetProvider(ProviderType providerType)
     {
@@ -21,6 +27,6 @@ public sealed partial class PortManager : IExtension, IDisposable
 
     public void Dispose()
     {
-        // Extension is being disposed by the host
+        _extensionDisposedEvent.Set();
     }
 }
