@@ -25,6 +25,19 @@ public sealed partial class PortManagerPage : ListPage
         "WindowsTerminal", "OpenConsole",
         // SSH / remote
         "sshd", "ssh-agent",
+        // Hyper-V / virtualization
+        "vmms", "vmcompute", "vmwp", "vmconnect",
+        // Desktop apps that listen on ports
+        "Discord", "Spotify", "Slack", "Steam", "EpicGamesLauncher",
+        "chrome", "firefox", "brave",
+        // Surface / hardware / notifications
+        "SurfaceBroker", "SurfaceService", "SCNotification",
+        "Intel", "igfxEM", "igfxCUIService",
+        // Other common non-dev listeners
+        "NVDisplay.Container", "NVIDIA Web Helper",
+        "CmdPalGitHubExtension", "Microsoft.CmdPal.Ext.PowerToys",
+        "JPSoftworks.RecentFilesExtension",
+        "PortManager",
     };
 
     // Process names commonly associated with dev servers
@@ -53,26 +66,30 @@ public sealed partial class PortManagerPage : ListPage
 
             foreach (var (port, pid) in activeConnections.OrderBy(x => x.Port))
             {
-                var processName = GetProcessName(pid);
+                var info = GetProcessInfo(pid);
 
-                if (SystemProcesses.Contains(processName))
+                if (SystemProcesses.Contains(info.Name))
                 {
                     continue;
                 }
 
-                var isDevServer = DevServerProcesses.Contains(processName);
+                var isDevServer = DevServerProcesses.Contains(info.Name);
                 var tags = new List<Tag>();
                 if (isDevServer)
                 {
                     tags.Add(new Tag("dev server"));
                 }
 
-                var stopCommand = new StopProcessCommand(pid, port, processName, this);
+                var stopCommand = new StopProcessCommand(pid, port, info.Name, this);
+
+                var displayTitle = string.IsNullOrEmpty(info.Description)
+                    ? $":{port}  —  {info.Name}"
+                    : $":{port}  —  {info.Description}";
 
                 var item = new ListItem(stopCommand)
                 {
-                    Title = $":{port}  —  {processName}",
-                    Subtitle = $"PID {pid}",
+                    Title = displayTitle,
+                    Subtitle = $"{info.Name} · PID {pid}" + (string.IsNullOrEmpty(info.CommandHint) ? "" : $" · {info.CommandHint}"),
                     Icon = new IconInfo(isDevServer ? "\uE774" : "\uEA3A"),
                     Tags = [.. tags],
                 };
@@ -182,16 +199,155 @@ public sealed partial class PortManagerPage : ListPage
         return results;
     }
 
-    private static string GetProcessName(int pid)
+    private record ProcessInfo(string Name, string Description, string CommandHint);
+
+    private static ProcessInfo GetProcessInfo(int pid)
     {
         try
         {
             using var process = Process.GetProcessById(pid);
-            return process.ProcessName;
+            var name = process.ProcessName;
+            var description = "";
+            var commandHint = "";
+
+            try
+            {
+                var mainModule = process.MainModule;
+                if (mainModule?.FileVersionInfo?.FileDescription is { Length: > 0 } desc
+                    && !string.Equals(desc, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    description = desc;
+                }
+            }
+            catch
+            {
+                // Access denied for some processes
+            }
+
+            // Try to get command line for context (e.g., "dotnet run --project MyApi")
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "wmic",
+                    Arguments = $"process where ProcessId={pid} get CommandLine /format:list",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                using var wmicProc = Process.Start(psi);
+                if (wmicProc is not null)
+                {
+                    var output = wmicProc.StandardOutput.ReadToEnd();
+                    wmicProc.WaitForExit(2000);
+
+                    var cmdLine = output
+                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                        .FirstOrDefault(l => l.StartsWith("CommandLine=", StringComparison.OrdinalIgnoreCase));
+
+                    if (cmdLine is not null)
+                    {
+                        var fullCmd = cmdLine["CommandLine=".Length..].Trim();
+                        commandHint = ExtractCommandHint(fullCmd, name);
+                    }
+                }
+            }
+            catch
+            {
+                // wmic may not be available
+            }
+
+            // If no description yet, try to derive one from the command hint
+            if (string.IsNullOrEmpty(description) && !string.IsNullOrEmpty(commandHint))
+            {
+                description = $"{name} ({commandHint})";
+            }
+
+            return new ProcessInfo(name, description, commandHint);
         }
         catch
         {
-            return "Unknown";
+            return new ProcessInfo("Unknown", "", "");
         }
+    }
+
+    private static string ExtractCommandHint(string commandLine, string processName)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            return "";
+        }
+
+        // For node: extract the script being run (e.g., "vite", "next dev", "server.js")
+        if (string.Equals(processName, "node", StringComparison.OrdinalIgnoreCase))
+        {
+            // Look for known tool names in the path
+            var knownTools = new[] { "vite", "next", "nuxt", "remix", "astro", "webpack", "esbuild", "tsx", "ts-node" };
+            foreach (var tool in knownTools)
+            {
+                if (commandLine.Contains(tool, StringComparison.OrdinalIgnoreCase))
+                {
+                    return tool;
+                }
+            }
+
+            // Fall back to the last .js/.ts file in the command
+            var parts = commandLine.Split(' ');
+            var script = parts.LastOrDefault(p => p.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
+                                               || p.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
+                                               || p.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase));
+            if (script is not null)
+            {
+                return Path.GetFileName(script);
+            }
+        }
+
+        // For dotnet: extract the project/dll being run
+        if (string.Equals(processName, "dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            if (commandLine.Contains("--project", StringComparison.OrdinalIgnoreCase))
+            {
+                var idx = commandLine.IndexOf("--project", StringComparison.OrdinalIgnoreCase);
+                var rest = commandLine[(idx + 10)..].TrimStart();
+                var project = rest.Split(' ')[0];
+                return Path.GetFileName(project);
+            }
+
+            var dllPart = commandLine.Split(' ')
+                .LastOrDefault(p => p.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+            if (dllPart is not null)
+            {
+                return Path.GetFileNameWithoutExtension(dllPart);
+            }
+
+            // "dotnet run" in a project directory
+            if (commandLine.Contains(" run", StringComparison.OrdinalIgnoreCase))
+            {
+                return "dotnet run";
+            }
+        }
+
+        // For python: extract the script or module
+        if (processName.StartsWith("python", StringComparison.OrdinalIgnoreCase))
+        {
+            var knownFrameworks = new[] { "uvicorn", "gunicorn", "flask", "django", "fastapi", "streamlit" };
+            foreach (var fw in knownFrameworks)
+            {
+                if (commandLine.Contains(fw, StringComparison.OrdinalIgnoreCase))
+                {
+                    return fw;
+                }
+            }
+
+            var pyFile = commandLine.Split(' ')
+                .LastOrDefault(p => p.EndsWith(".py", StringComparison.OrdinalIgnoreCase));
+            if (pyFile is not null)
+            {
+                return Path.GetFileName(pyFile);
+            }
+        }
+
+        return "";
     }
 }
