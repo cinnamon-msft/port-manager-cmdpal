@@ -206,55 +206,38 @@ public sealed partial class PortManagerPage : ListPage
             var commandHint = "";
             var workingDir = "";
 
-            // Try to get command line and working directory via wmic
+            // Try to get command line via PowerShell CIM query
             try
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "wmic",
-                    Arguments = $"process where ProcessId={pid} get CommandLine,ExecutablePath /format:list",
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -Command \"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -ExpandProperty CommandLine\"",
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
 
-                using var wmicProc = Process.Start(psi);
-                if (wmicProc is not null)
+                using var queryProc = Process.Start(psi);
+                if (queryProc is not null)
                 {
-                    var output = wmicProc.StandardOutput.ReadToEnd();
-                    wmicProc.WaitForExit(2000);
+                    var fullCmd = queryProc.StandardOutput.ReadToEnd().Trim();
+                    queryProc.WaitForExit(3000);
 
-                    var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-                    var cmdLine = lines
-                        .FirstOrDefault(l => l.StartsWith("CommandLine=", StringComparison.OrdinalIgnoreCase));
-                    if (cmdLine is not null)
+                    if (!string.IsNullOrEmpty(fullCmd))
                     {
-                        var fullCmd = cmdLine["CommandLine=".Length..].Trim();
                         commandHint = ExtractCommandHint(fullCmd, name);
 
-                        // Extract the working directory from the command line paths
                         if (string.IsNullOrEmpty(commandHint))
                         {
                             workingDir = ExtractProjectDir(fullCmd);
-                        }
-                    }
-
-                    var exePath = lines
-                        .FirstOrDefault(l => l.StartsWith("ExecutablePath=", StringComparison.OrdinalIgnoreCase));
-                    if (exePath is not null && string.IsNullOrEmpty(workingDir))
-                    {
-                        var path = exePath["ExecutablePath=".Length..].Trim();
-                        if (!string.IsNullOrEmpty(path))
-                        {
-                            workingDir = Path.GetDirectoryName(path) ?? "";
                         }
                     }
                 }
             }
             catch
             {
-                // wmic may not be available
+                // PowerShell may not be available
             }
 
             // Build a user-friendly display name

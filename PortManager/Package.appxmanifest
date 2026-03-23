@@ -10,7 +10,7 @@
   <Identity
     Name="PortManager"
     Publisher="CN=PortManager"
-    Version="1.0.7.0" />
+    Version="1.0.8.0" />
 
   <Properties>
     <DisplayName>Port Manager</DisplayName>
