@@ -82,14 +82,10 @@ public sealed partial class PortManagerPage : ListPage
 
                 var stopCommand = new StopProcessCommand(pid, port, info.Name, this);
 
-                var displayTitle = string.IsNullOrEmpty(info.Description)
-                    ? $":{port}  —  {info.Name}"
-                    : $":{port}  —  {info.Description}";
-
                 var item = new ListItem(stopCommand)
                 {
-                    Title = displayTitle,
-                    Subtitle = $"{info.Name} · PID {pid}" + (string.IsNullOrEmpty(info.CommandHint) ? "" : $" · {info.CommandHint}"),
+                    Title = $":{port}  —  {info.DisplayName}",
+                    Subtitle = info.Subtitle,
                     Icon = new IconInfo(isDevServer ? "\uE774" : "\uEA3A"),
                     Tags = [.. tags],
                 };
@@ -199,7 +195,7 @@ public sealed partial class PortManagerPage : ListPage
         return results;
     }
 
-    private record ProcessInfo(string Name, string Description, string CommandHint);
+    private record ProcessInfo(string Name, string DisplayName, string Subtitle);
 
     private static ProcessInfo GetProcessInfo(int pid)
     {
@@ -207,30 +203,16 @@ public sealed partial class PortManagerPage : ListPage
         {
             using var process = Process.GetProcessById(pid);
             var name = process.ProcessName;
-            var description = "";
             var commandHint = "";
+            var workingDir = "";
 
-            try
-            {
-                var mainModule = process.MainModule;
-                if (mainModule?.FileVersionInfo?.FileDescription is { Length: > 0 } desc
-                    && !string.Equals(desc, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    description = desc;
-                }
-            }
-            catch
-            {
-                // Access denied for some processes
-            }
-
-            // Try to get command line for context (e.g., "dotnet run --project MyApi")
+            // Try to get command line and working directory via wmic
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = "wmic",
-                    Arguments = $"process where ProcessId={pid} get CommandLine /format:list",
+                    Arguments = $"process where ProcessId={pid} get CommandLine,ExecutablePath /format:list",
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -242,14 +224,31 @@ public sealed partial class PortManagerPage : ListPage
                     var output = wmicProc.StandardOutput.ReadToEnd();
                     wmicProc.WaitForExit(2000);
 
-                    var cmdLine = output
-                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                        .FirstOrDefault(l => l.StartsWith("CommandLine=", StringComparison.OrdinalIgnoreCase));
+                    var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
+                    var cmdLine = lines
+                        .FirstOrDefault(l => l.StartsWith("CommandLine=", StringComparison.OrdinalIgnoreCase));
                     if (cmdLine is not null)
                     {
                         var fullCmd = cmdLine["CommandLine=".Length..].Trim();
                         commandHint = ExtractCommandHint(fullCmd, name);
+
+                        // Extract the working directory from the command line paths
+                        if (string.IsNullOrEmpty(commandHint))
+                        {
+                            workingDir = ExtractProjectDir(fullCmd);
+                        }
+                    }
+
+                    var exePath = lines
+                        .FirstOrDefault(l => l.StartsWith("ExecutablePath=", StringComparison.OrdinalIgnoreCase));
+                    if (exePath is not null && string.IsNullOrEmpty(workingDir))
+                    {
+                        var path = exePath["ExecutablePath=".Length..].Trim();
+                        if (!string.IsNullOrEmpty(path))
+                        {
+                            workingDir = Path.GetDirectoryName(path) ?? "";
+                        }
                     }
                 }
             }
@@ -258,18 +257,91 @@ public sealed partial class PortManagerPage : ListPage
                 // wmic may not be available
             }
 
-            // If no description yet, try to derive one from the command hint
-            if (string.IsNullOrEmpty(description) && !string.IsNullOrEmpty(commandHint))
+            // Build a user-friendly display name
+            var displayName = BuildDisplayName(name, commandHint, workingDir);
+            var subtitle = $"{name} · PID {pid}";
+            if (!string.IsNullOrEmpty(commandHint))
             {
-                description = $"{name} ({commandHint})";
+                subtitle = $"{name} · {commandHint} · PID {pid}";
             }
 
-            return new ProcessInfo(name, description, commandHint);
+            return new ProcessInfo(name, displayName, subtitle);
         }
         catch
         {
-            return new ProcessInfo("Unknown", "", "");
+            return new ProcessInfo("Unknown", "Unknown process", $"PID {pid}");
         }
+    }
+
+    private static string BuildDisplayName(string processName, string commandHint, string workingDir)
+    {
+        // If we found a specific tool/framework, use that
+        if (!string.IsNullOrEmpty(commandHint))
+        {
+            return commandHint;
+        }
+
+        // Try to get project name from the working directory
+        if (!string.IsNullOrEmpty(workingDir))
+        {
+            var dirName = new DirectoryInfo(workingDir).Name;
+
+            // Skip generic directory names
+            if (!string.Equals(dirName, "bin", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(dirName, "Debug", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(dirName, "Release", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(dirName, "net8.0", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(dirName, "net9.0", StringComparison.OrdinalIgnoreCase)
+                && !dirName.StartsWith("net", StringComparison.OrdinalIgnoreCase))
+            {
+                return dirName;
+            }
+
+            // Walk up from bin/Debug/net9.0 to the project directory
+            var parent = Directory.GetParent(workingDir);
+            while (parent is not null)
+            {
+                var pName = parent.Name;
+                if (!string.Equals(pName, "bin", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(pName, "Debug", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(pName, "Release", StringComparison.OrdinalIgnoreCase)
+                    && !pName.StartsWith("net", StringComparison.OrdinalIgnoreCase))
+                {
+                    return pName;
+                }
+
+                parent = parent.Parent;
+            }
+        }
+
+        return processName;
+    }
+
+    private static string ExtractProjectDir(string commandLine)
+    {
+        // Try to find a directory path in the command line
+        var parts = commandLine.Split('"', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var part in parts)
+        {
+            var trimmed = part.Trim();
+            if (trimmed.Contains('\\') || trimmed.Contains('/'))
+            {
+                try
+                {
+                    var dir = Path.GetDirectoryName(trimmed);
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    {
+                        return dir;
+                    }
+                }
+                catch
+                {
+                    // Not a valid path
+                }
+            }
+        }
+
+        return "";
     }
 
     private static string ExtractCommandHint(string commandLine, string processName)
@@ -283,13 +355,20 @@ public sealed partial class PortManagerPage : ListPage
         if (string.Equals(processName, "node", StringComparison.OrdinalIgnoreCase))
         {
             // Look for known tool names in the path
-            var knownTools = new[] { "vite", "next", "nuxt", "remix", "astro", "webpack", "esbuild", "tsx", "ts-node" };
+            var knownTools = new[] { "vite", "next", "nuxt", "remix", "astro", "webpack", "esbuild", "tsx", "ts-node", "react-scripts" };
             foreach (var tool in knownTools)
             {
                 if (commandLine.Contains(tool, StringComparison.OrdinalIgnoreCase))
                 {
                     return tool;
                 }
+            }
+
+            // Try to find the project directory and read package.json name
+            var projectName = TryGetNodeProjectName(commandLine);
+            if (!string.IsNullOrEmpty(projectName))
+            {
+                return projectName;
             }
 
             // Fall back to the last .js/.ts file in the command
@@ -321,7 +400,6 @@ public sealed partial class PortManagerPage : ListPage
                 return Path.GetFileNameWithoutExtension(dllPart);
             }
 
-            // "dotnet run" in a project directory
             if (commandLine.Contains(" run", StringComparison.OrdinalIgnoreCase))
             {
                 return "dotnet run";
@@ -346,6 +424,101 @@ public sealed partial class PortManagerPage : ListPage
             {
                 return Path.GetFileName(pyFile);
             }
+        }
+
+        return "";
+    }
+
+    private static string TryGetNodeProjectName(string commandLine)
+    {
+        // Look for paths in the command line and find the nearest package.json
+        try
+        {
+            // Extract paths from the command line (handling quoted and unquoted)
+            var segments = commandLine.Split(new[] { ' ', '"' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var segment in segments)
+            {
+                if (!segment.Contains('\\') && !segment.Contains('/'))
+                {
+                    continue;
+                }
+
+                string? dir = null;
+                try
+                {
+                    dir = File.Exists(segment) ? Path.GetDirectoryName(segment) : null;
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(dir))
+                {
+                    continue;
+                }
+
+                // Walk up looking for package.json
+                var current = new DirectoryInfo(dir);
+                while (current is not null)
+                {
+                    var packageJson = Path.Combine(current.FullName, "package.json");
+                    if (File.Exists(packageJson))
+                    {
+                        try
+                        {
+                            var content = File.ReadAllText(packageJson);
+                            // Simple JSON name extraction without a dependency
+                            var nameMatch = System.Text.RegularExpressions.Regex.Match(
+                                content, @"""name""\s*:\s*""([^""]+)""");
+                            if (nameMatch.Success)
+                            {
+                                return nameMatch.Groups[1].Value;
+                            }
+                        }
+                        catch
+                        {
+                            // Can't read package.json
+                        }
+
+                        return current.Name;
+                    }
+
+                    // Don't walk above common project roots
+                    if (string.Equals(current.Name, "node_modules", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current = current.Parent;
+                        if (current is not null)
+                        {
+                            var rootPkgJson = Path.Combine(current.FullName, "package.json");
+                            if (File.Exists(rootPkgJson))
+                            {
+                                try
+                                {
+                                    var content = File.ReadAllText(rootPkgJson);
+                                    var nameMatch = System.Text.RegularExpressions.Regex.Match(
+                                        content, @"""name""\s*:\s*""([^""]+)""");
+                                    if (nameMatch.Success)
+                                    {
+                                        return nameMatch.Groups[1].Value;
+                                    }
+                                }
+                                catch { }
+
+                                return current.Name;
+                            }
+                        }
+
+                        break;
+                    }
+
+                    current = current.Parent;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
         }
 
         return "";
