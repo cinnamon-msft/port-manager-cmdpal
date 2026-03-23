@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "PortManager (Unpackaged)": {
+      "commandName": "Project"
+    },
+    "PortManager (Packaged)": {
+      "commandName": "MsixPackage"
+    }
+  }
+}
