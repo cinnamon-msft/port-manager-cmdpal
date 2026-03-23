@@ -10,12 +10,12 @@ public sealed partial class PortManager : IExtension, IDisposable
 {
     private readonly PortManagerCommandsProvider _provider = new();
 
-    public object? GetProvider(ProviderType providerType)
+    public object GetProvider(ProviderType providerType)
     {
         return providerType switch
         {
             ProviderType.Commands => _provider,
-            _ => null,
+            _ => null!,
         };
     }
 

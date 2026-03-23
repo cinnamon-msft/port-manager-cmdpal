@@ -5,7 +5,7 @@ using System.Net.NetworkInformation;
 
 namespace PortManager;
 
-internal sealed partial class PortManagerPage : ListPage
+public sealed partial class PortManagerPage : ListPage
 {
     private static readonly int[] CommonDevPorts =
     [
@@ -23,25 +23,40 @@ internal sealed partial class PortManagerPage : ListPage
     public override IListItem[] GetItems()
     {
         var items = new List<IListItem>();
-        var activeConnections = GetActivePortMappings();
 
-        foreach (var (port, pid) in activeConnections.OrderBy(x => x.Port))
+        try
         {
-            var processName = GetProcessName(pid);
-            var isCommonPort = CommonDevPorts.Contains(port);
-            var tag = isCommonPort ? new Tag("dev") : null;
+            var activeConnections = GetActivePortMappings();
 
-            var stopCommand = new StopProcessCommand(pid, port, processName, this);
-
-            var item = new ListItem(stopCommand)
+            foreach (var (port, pid) in activeConnections.OrderBy(x => x.Port))
             {
-                Title = $":{port}",
-                Subtitle = $"{processName} (PID {pid})",
-                Icon = new IconInfo("\uEA3A"), // StatusCircleOuter icon
-                Tags = tag is not null ? [tag] : [],
-            };
+                var processName = GetProcessName(pid);
+                var isCommonPort = CommonDevPorts.Contains(port);
+                var tag = isCommonPort ? new Tag("dev") : null;
 
-            items.Add(item);
+                var stopCommand = new StopProcessCommand(pid, port, processName, this);
+
+                var item = new ListItem(stopCommand)
+                {
+                    Title = $":{port}",
+                    Subtitle = $"{processName} (PID {pid})",
+                    Icon = new IconInfo("\uEA3A"),
+                    Tags = tag is not null ? [tag] : [],
+                };
+
+                items.Add(item);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.Write($"PortManager error: {ex}");
+            items.Add(new ListItem(new NoOpCommand())
+            {
+                Title = "Error scanning ports",
+                Subtitle = ex.Message,
+                Icon = new IconInfo("\uE783"),
+            });
+            return [.. items];
         }
 
         if (items.Count == 0)
@@ -50,7 +65,7 @@ internal sealed partial class PortManagerPage : ListPage
             {
                 Title = "No active listeners found",
                 Subtitle = "All common dev ports are free",
-                Icon = new IconInfo("\uE930"), // CheckMark icon
+                Icon = new IconInfo("\uE930"),
             });
         }
 

@@ -4,7 +4,7 @@ using System.Diagnostics;
 
 namespace PortManager;
 
-internal sealed partial class StopProcessCommand : InvokableCommand
+public sealed partial class StopProcessCommand : InvokableCommand
 {
     private readonly int _pid;
     private readonly int _port;
