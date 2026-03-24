@@ -426,10 +426,8 @@ public sealed partial class PortManagerPage : ListPage
 
     private static string TryGetNodeProjectName(string commandLine)
     {
-        // Look for paths in the command line and find the nearest package.json
         try
         {
-            // Extract paths from the command line (handling quoted and unquoted)
             var segments = commandLine.Split(new[] { ' ', '"' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var segment in segments)
             {
@@ -453,6 +451,32 @@ public sealed partial class PortManagerPage : ListPage
                     continue;
                 }
 
+                // If the path is inside node_modules, jump directly to the project root
+                var nmIndex = dir.IndexOf("node_modules", StringComparison.OrdinalIgnoreCase);
+                if (nmIndex > 0)
+                {
+                    var projectRoot = dir[..(nmIndex - 1)];
+                    var rootPkgJson = Path.Combine(projectRoot, "package.json");
+                    if (File.Exists(rootPkgJson))
+                    {
+                        try
+                        {
+                            var content = File.ReadAllText(rootPkgJson);
+                            var nameMatch = System.Text.RegularExpressions.Regex.Match(
+                                content, @"""name""\s*:\s*""([^""]+)""");
+                            if (nameMatch.Success)
+                            {
+                                return nameMatch.Groups[1].Value;
+                            }
+                        }
+                        catch { }
+
+                        return new DirectoryInfo(projectRoot).Name;
+                    }
+
+                    continue;
+                }
+
                 // Walk up looking for package.json
                 var current = new DirectoryInfo(dir);
                 while (current is not null)
@@ -463,7 +487,6 @@ public sealed partial class PortManagerPage : ListPage
                         try
                         {
                             var content = File.ReadAllText(packageJson);
-                            // Simple JSON name extraction without a dependency
                             var nameMatch = System.Text.RegularExpressions.Regex.Match(
                                 content, @"""name""\s*:\s*""([^""]+)""");
                             if (nameMatch.Success)
@@ -471,40 +494,9 @@ public sealed partial class PortManagerPage : ListPage
                                 return nameMatch.Groups[1].Value;
                             }
                         }
-                        catch
-                        {
-                            // Can't read package.json
-                        }
+                        catch { }
 
                         return current.Name;
-                    }
-
-                    // Don't walk above common project roots
-                    if (string.Equals(current.Name, "node_modules", StringComparison.OrdinalIgnoreCase))
-                    {
-                        current = current.Parent;
-                        if (current is not null)
-                        {
-                            var rootPkgJson = Path.Combine(current.FullName, "package.json");
-                            if (File.Exists(rootPkgJson))
-                            {
-                                try
-                                {
-                                    var content = File.ReadAllText(rootPkgJson);
-                                    var nameMatch = System.Text.RegularExpressions.Regex.Match(
-                                        content, @"""name""\s*:\s*""([^""]+)""");
-                                    if (nameMatch.Success)
-                                    {
-                                        return nameMatch.Groups[1].Value;
-                                    }
-                                }
-                                catch { }
-
-                                return current.Name;
-                            }
-                        }
-
-                        break;
                     }
 
                     current = current.Parent;
