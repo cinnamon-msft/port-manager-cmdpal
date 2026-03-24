@@ -25,18 +25,37 @@ public sealed partial class StopProcessCommand : InvokableCommand
     {
         try
         {
-            using var process = Process.GetProcessById(_pid);
-            process.Kill(entireProcessTree: true);
+            // Try taskkill /T for full process tree (works better with node)
+            var psi = new ProcessStartInfo
+            {
+                FileName = "taskkill",
+                Arguments = $"/PID {_pid} /T /F",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+
+            using var killProc = Process.Start(psi);
+            killProc?.WaitForExit(5000);
         }
-        catch (ArgumentException)
+        catch
         {
-            // Process already exited
-        }
-        catch (Exception ex)
-        {
-            Debug.Write($"Failed to stop PID {_pid}: {ex.Message}");
+            // Fallback to Process.Kill
+            try
+            {
+                using var process = Process.GetProcessById(_pid);
+                process.Kill();
+                process.WaitForExit(3000);
+            }
+            catch
+            {
+                // Process may already be gone
+            }
         }
 
+        // Small delay to let the port free up
+        System.Threading.Thread.Sleep(500);
         _page.Refresh();
         return CommandResult.KeepOpen();
     }

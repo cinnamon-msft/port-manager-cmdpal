@@ -139,7 +139,7 @@ public sealed partial class PortManagerPage : ListPage
             var psi = new ProcessStartInfo
             {
                 FileName = "netstat.exe",
-                Arguments = "-ano -p TCP",
+                Arguments = "-ano",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
