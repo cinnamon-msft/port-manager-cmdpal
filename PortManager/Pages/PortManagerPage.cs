@@ -202,6 +202,7 @@ public sealed partial class PortManagerPage : ListPage
     }
 
     private record ProcessInfo(string Name, string DisplayName, string Subtitle);
+    private record CommandInfo(string ProjectName, string ToolName);
 
     private static Dictionary<int, string> GetCommandLines(List<int> pids)
     {
@@ -238,26 +239,28 @@ public sealed partial class PortManagerPage : ListPage
         {
             using var process = Process.GetProcessById(pid);
             var name = process.ProcessName;
-            var commandHint = "";
+            var cmdInfo = !string.IsNullOrEmpty(commandLine)
+                ? ExtractCommandInfo(commandLine, name)
+                : new CommandInfo("", "");
+
             var workingDir = "";
-
-            if (!string.IsNullOrEmpty(commandLine))
+            if (string.IsNullOrEmpty(cmdInfo.ProjectName) && !string.IsNullOrEmpty(commandLine))
             {
-                commandHint = ExtractCommandHint(commandLine, name);
-
-                if (string.IsNullOrEmpty(commandHint))
-                {
-                    workingDir = ExtractProjectDir(commandLine);
-                }
+                workingDir = ExtractProjectDir(commandLine);
             }
 
-            // Build a user-friendly display name
-            var displayName = BuildDisplayName(name, commandHint, workingDir);
-            var subtitle = $"{name} · PID {pid}";
-            if (!string.IsNullOrEmpty(commandHint))
+            var displayName = !string.IsNullOrEmpty(cmdInfo.ProjectName)
+                ? cmdInfo.ProjectName
+                : BuildDisplayName(name, "", workingDir);
+
+            var subtitleParts = new List<string> { name };
+            if (!string.IsNullOrEmpty(cmdInfo.ToolName))
             {
-                subtitle = $"{name} · {commandHint} · PID {pid}";
+                subtitleParts.Add(cmdInfo.ToolName);
             }
+
+            subtitleParts.Add($"PID {pid}");
+            var subtitle = string.Join(" · ", subtitleParts);
 
             return new ProcessInfo(name, displayName, subtitle);
         }
@@ -338,89 +341,87 @@ public sealed partial class PortManagerPage : ListPage
         return "";
     }
 
-    private static string ExtractCommandHint(string commandLine, string processName)
+    private static CommandInfo ExtractCommandInfo(string commandLine, string processName)
     {
         if (string.IsNullOrWhiteSpace(commandLine))
         {
-            return "";
+            return new CommandInfo("", "");
         }
 
-        // For node: extract the script being run (e.g., "vite", "next dev", "server.js")
         if (string.Equals(processName, "node", StringComparison.OrdinalIgnoreCase))
         {
-            // Look for known tool names in the path
             var knownTools = new[] { "vite", "next", "nuxt", "remix", "astro", "webpack", "esbuild", "tsx", "ts-node", "react-scripts" };
-            foreach (var tool in knownTools)
+            var tool = "";
+            foreach (var t in knownTools)
             {
-                if (commandLine.Contains(tool, StringComparison.OrdinalIgnoreCase))
+                if (commandLine.Contains(t, StringComparison.OrdinalIgnoreCase))
                 {
-                    return tool;
+                    tool = t;
+                    break;
                 }
             }
 
-            // Try to find the project directory and read package.json name
             var projectName = TryGetNodeProjectName(commandLine);
-            if (!string.IsNullOrEmpty(projectName))
+
+            if (string.IsNullOrEmpty(projectName))
             {
-                return projectName;
+                var parts = commandLine.Split(' ');
+                var script = parts.LastOrDefault(p => p.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
+                                                    || p.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
+                                                    || p.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase));
+                if (script is not null)
+                {
+                    projectName = Path.GetFileName(script);
+                }
             }
 
-            // Fall back to the last .js/.ts file in the command
-            var parts = commandLine.Split(' ');
-            var script = parts.LastOrDefault(p => p.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
-                                               || p.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)
-                                               || p.EndsWith(".mjs", StringComparison.OrdinalIgnoreCase));
-            if (script is not null)
-            {
-                return Path.GetFileName(script);
-            }
+            return new CommandInfo(projectName, tool);
         }
 
-        // For dotnet: extract the project/dll being run
         if (string.Equals(processName, "dotnet", StringComparison.OrdinalIgnoreCase))
         {
+            var projectName = "";
             if (commandLine.Contains("--project", StringComparison.OrdinalIgnoreCase))
             {
                 var idx = commandLine.IndexOf("--project", StringComparison.OrdinalIgnoreCase);
                 var rest = commandLine[(idx + 10)..].TrimStart();
-                var project = rest.Split(' ')[0];
-                return Path.GetFileName(project);
+                projectName = Path.GetFileName(rest.Split(' ')[0]);
+            }
+            else
+            {
+                var dllPart = commandLine.Split(' ')
+                    .LastOrDefault(p => p.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
+                if (dllPart is not null)
+                {
+                    projectName = Path.GetFileNameWithoutExtension(dllPart);
+                }
             }
 
-            var dllPart = commandLine.Split(' ')
-                .LastOrDefault(p => p.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
-            if (dllPart is not null)
-            {
-                return Path.GetFileNameWithoutExtension(dllPart);
-            }
-
-            if (commandLine.Contains(" run", StringComparison.OrdinalIgnoreCase))
-            {
-                return "dotnet run";
-            }
+            var tool = commandLine.Contains(" run", StringComparison.OrdinalIgnoreCase) ? "dotnet run" : "";
+            return new CommandInfo(projectName, tool);
         }
 
-        // For python: extract the script or module
         if (processName.StartsWith("python", StringComparison.OrdinalIgnoreCase))
         {
             var knownFrameworks = new[] { "uvicorn", "gunicorn", "flask", "django", "fastapi", "streamlit" };
+            var tool = "";
             foreach (var fw in knownFrameworks)
             {
                 if (commandLine.Contains(fw, StringComparison.OrdinalIgnoreCase))
                 {
-                    return fw;
+                    tool = fw;
+                    break;
                 }
             }
 
             var pyFile = commandLine.Split(' ')
                 .LastOrDefault(p => p.EndsWith(".py", StringComparison.OrdinalIgnoreCase));
-            if (pyFile is not null)
-            {
-                return Path.GetFileName(pyFile);
-            }
+            var projectName = pyFile is not null ? Path.GetFileName(pyFile) : "";
+
+            return new CommandInfo(projectName, tool);
         }
 
-        return "";
+        return new CommandInfo("", "");
     }
 
     private static string TryGetNodeProjectName(string commandLine)
