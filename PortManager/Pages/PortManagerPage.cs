@@ -1,6 +1,7 @@
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 using System.Diagnostics;
+using System.Management;
 
 namespace PortManager;
 
@@ -64,9 +65,14 @@ public sealed partial class PortManagerPage : ListPage
             var items = new List<IListItem>();
             var activeConnections = GetActivePortMappings();
 
+            // Batch-query all command lines in one WMI call
+            var pids = activeConnections.Select(x => x.Pid).Distinct().ToList();
+            var commandLines = GetCommandLines(pids);
+
             foreach (var (port, pid) in activeConnections.OrderBy(x => x.Port))
             {
-                var info = GetProcessInfo(pid);
+                commandLines.TryGetValue(pid, out var cmdLine);
+                var info = GetProcessInfo(pid, cmdLine ?? "");
 
                 if (SystemProcesses.Contains(info.Name))
                 {
@@ -197,7 +203,36 @@ public sealed partial class PortManagerPage : ListPage
 
     private record ProcessInfo(string Name, string DisplayName, string Subtitle);
 
-    private static ProcessInfo GetProcessInfo(int pid)
+    private static Dictionary<int, string> GetCommandLines(List<int> pids)
+    {
+        var result = new Dictionary<int, string>();
+        if (pids.Count == 0)
+        {
+            return result;
+        }
+
+        try
+        {
+            var pidFilter = string.Join(" OR ", pids.Select(p => $"ProcessId={p}"));
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT ProcessId, CommandLine FROM Win32_Process WHERE {pidFilter}");
+
+            foreach (var obj in searcher.Get())
+            {
+                var pid = Convert.ToInt32(obj["ProcessId"]);
+                var cmd = obj["CommandLine"]?.ToString() ?? "";
+                result[pid] = cmd;
+            }
+        }
+        catch
+        {
+            // WMI query failed — return empty
+        }
+
+        return result;
+    }
+
+    private static ProcessInfo GetProcessInfo(int pid, string commandLine)
     {
         try
         {
@@ -206,38 +241,14 @@ public sealed partial class PortManagerPage : ListPage
             var commandHint = "";
             var workingDir = "";
 
-            // Try to get command line via PowerShell CIM query
-            try
+            if (!string.IsNullOrEmpty(commandLine))
             {
-                var psi = new ProcessStartInfo
+                commandHint = ExtractCommandHint(commandLine, name);
+
+                if (string.IsNullOrEmpty(commandHint))
                 {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -Command \"Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -ExpandProperty CommandLine\"",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                using var queryProc = Process.Start(psi);
-                if (queryProc is not null)
-                {
-                    var fullCmd = queryProc.StandardOutput.ReadToEnd().Trim();
-                    queryProc.WaitForExit(3000);
-
-                    if (!string.IsNullOrEmpty(fullCmd))
-                    {
-                        commandHint = ExtractCommandHint(fullCmd, name);
-
-                        if (string.IsNullOrEmpty(commandHint))
-                        {
-                            workingDir = ExtractProjectDir(fullCmd);
-                        }
-                    }
+                    workingDir = ExtractProjectDir(commandLine);
                 }
-            }
-            catch
-            {
-                // PowerShell may not be available
             }
 
             // Build a user-friendly display name
