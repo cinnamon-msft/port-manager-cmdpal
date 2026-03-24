@@ -39,6 +39,12 @@ public sealed partial class PortManagerPage : ListPage
         "CmdPalGitHubExtension", "Microsoft.CmdPal.Ext.PowerToys",
         "JPSoftworks.RecentFilesExtension",
         "PortManager",
+        // OneDrive / sync services
+        "OneDrive.Sync.Service", "OneDriveSyncService",
+        // Screen capture / productivity apps
+        "TechSmithAgent", "TechSmithService", "SnagitEditor", "Camtasia",
+        // Misc desktop apps
+        "qcdpps",
     };
 
     // Process names commonly associated with dev servers
@@ -74,16 +80,10 @@ public sealed partial class PortManagerPage : ListPage
                 commandLines.TryGetValue(pid, out var cmdLine);
                 var info = GetProcessInfo(pid, cmdLine ?? "");
 
-                if (SystemProcesses.Contains(info.Name))
+                // Only show recognized dev server processes
+                if (!DevServerProcesses.Contains(info.Name))
                 {
                     continue;
-                }
-
-                var isDevServer = DevServerProcesses.Contains(info.Name);
-                var tags = new List<Tag>();
-                if (isDevServer)
-                {
-                    tags.Add(new Tag("dev server"));
                 }
 
                 var stopCommand = new StopProcessCommand(pid, port, info.Name, this);
@@ -92,8 +92,7 @@ public sealed partial class PortManagerPage : ListPage
                 {
                     Title = $":{port}  —  {info.DisplayName}",
                     Subtitle = info.Subtitle,
-                    Icon = new IconInfo(isDevServer ? "\uE774" : "\uEA3A"),
-                    Tags = [.. tags],
+                    Icon = new IconInfo("\uE774"),
                 };
 
                 items.Add(item);
